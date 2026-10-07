@@ -52,6 +52,36 @@ public class HitAndRun : Callout
         // describe it before then.
         _vehicle?.WhenHere(DressVehicle);
         _suspect = await SpawnSuspect(RandomHash.Ped(), ((Vector3)dump).Around(3f).ClosestPedPlacement(), dump.W);
+        _ = SeatSuspect();
+    }
+
+    // The car is dumped 250-600 m from the scene, so the officer usually arrives before it and the
+    // suspect reach this client: OnStart can't seat them. Done once both are here and placed;
+    // settling a ped after seating it would pull them back out onto the pavement.
+    private async Task SeatSuspect()
+    {
+        while (!Ended)
+        {
+            var car = _vehicle?.Vehicle;
+            var ped = _suspect?.Ped;
+            if (car is not null && ped is not null && ped.Exists() && IsSettled(car) && IsSettled(ped) && HasControl(ped))
+            {
+                ped.SetIntoVehicle(car, VehicleSeat.Driver);
+                return;
+            }
+
+            await BaseScript.Delay(250);
+        }
+    }
+
+    private static bool IsSettled(Entity entity) =>
+        entity.State.Get(CalloutHost.PlaceStateKey) is not string || entity.State.Get(CalloutHost.SettledStateKey) is true;
+
+    private static bool HasControl(Entity entity)
+    {
+        if (!API.NetworkGetEntityIsNetworked(entity.Handle) || API.NetworkHasControlOfEntity(entity.Handle)) return true;
+        API.NetworkRequestControlOfEntity(entity.Handle);
+        return false;
     }
 
     private static readonly VehicleColor[] Colors =
@@ -67,14 +97,17 @@ public class HitAndRun : Callout
     private void DressVehicle(Vehicle vehicle)
     {
         vehicle.Mods.PrimaryColor = Colors[_color];
-        // Front-end damage from the impact.
+        // Front-end damage from the impact. It reaches the front wheels too, and a car with
+        // damaged front wheels can't steer: in the pursuit it only went straight. The body keeps
+        // the dents; the wheels are made good so it can still turn.
         API.SetVehicleDamage(vehicle.Handle, 0f, 2f, 0.2f, 400f, 150f, true);
+        for (var wheel = 0; wheel < API.GetVehicleNumberOfWheels(vehicle.Handle); wheel++)
+            API.SetVehicleWheelHealth(vehicle.Handle, wheel, 1000f);
         vehicle.DirtLevel = 8f;
     }
 
     public override async void OnStart(Ped player)
-    { 
-        _suspect.Ped.SetIntoVehicle(_vehicle, VehicleSeat.Driver);
+    {
         ApplyInjuries(_victim.Ped);
         
         await PoseVictim(_victim.Ped);
