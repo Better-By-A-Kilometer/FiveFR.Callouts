@@ -47,40 +47,30 @@ public class HitAndRun : Callout
         var dump = ((Vector3)_location).RandomLocationWithHeadingAround(250f, 600f, LocationSurface.Road)
             .ClosestParkedCarPlacement();
         _vehicle = await SpawnCalloutVehicle(RandomHash.Vehicle(), dump);
-        // The car can be hundreds of metres from the officer until they go after it, so its look
-        // is set once it reaches this client. The colour is picked now so the witness can
-        // describe it before then.
-        _vehicle?.WhenHere(DressVehicle);
         _suspect = await SpawnSuspect(RandomHash.Ped(), ((Vector3)dump).Around(3f).ClosestPedPlacement(), dump.W);
-        _ = SeatSuspect();
+        // The car can be hundreds of metres from the officer until they go after it, so it's set
+        // up once it reaches this client. The colour is picked now so the witness can describe
+        // it before then.
+        _vehicle?.WhenHere(DressVehicle).WhenHere(car => _ = SeatSuspect(car));
     }
 
-    // The car is dumped 250-600 m from the scene, so the officer usually arrives before it and the
-    // suspect reach this client: OnStart can't seat them. Done once both are here and placed;
-    // settling a ped after seating it would pull them back out onto the pavement.
-    private async Task SeatSuspect()
+    // WhenHere has the car placed and in hand; the suspect, dumped beside it, can land a moment
+    // later. Seating them before they're placed would have the placement pull them back out onto
+    // the pavement.
+    private async Task SeatSuspect(Vehicle car)
     {
-        while (!Ended)
-        {
-            var car = _vehicle?.Vehicle;
-            var ped = _suspect?.Ped;
-            if (car is not null && ped is not null && ped.Exists() && IsSettled(car) && IsSettled(ped) && HasControl(ped))
-            {
-                ped.SetIntoVehicle(car, VehicleSeat.Driver);
-                return;
-            }
-
-            await BaseScript.Delay(250);
-        }
+        await QueueService.Predicate(() => !Ended && !IsReady(_suspect?.Ped), 250);
+        if (!Ended && car.Exists()) _suspect.Ped.SetIntoVehicle(car, VehicleSeat.Driver);
     }
 
-    private static bool IsSettled(Entity entity) =>
-        entity.State.Get(CalloutHost.PlaceStateKey) is not string || entity.State.Get(CalloutHost.SettledStateKey) is true;
-
-    private static bool HasControl(Entity entity)
+    // Placed by the client that had its spot loaded, and controlled here. Asks for control if not.
+    private static bool IsReady(Ped ped)
     {
-        if (!API.NetworkGetEntityIsNetworked(entity.Handle) || API.NetworkHasControlOfEntity(entity.Handle)) return true;
-        API.NetworkRequestControlOfEntity(entity.Handle);
+        if (ped is null || !ped.Exists()) return false;
+        if (ped.State.Get(CalloutHost.PlaceStateKey) is string && ped.State.Get(CalloutHost.SettledStateKey) is not true)
+            return false;
+        if (!API.NetworkGetEntityIsNetworked(ped.Handle) || API.NetworkHasControlOfEntity(ped.Handle)) return true;
+        API.NetworkRequestControlOfEntity(ped.Handle);
         return false;
     }
 
@@ -92,7 +82,7 @@ public class HitAndRun : Callout
 
     private static readonly string[] ColorNames = { "black", "silver", "red", "dark blue", "white", "dark green" };
 
-    private readonly int _color = rnd.Next(Colors.Length);
+    private readonly int _color = Colors.SelectRandom<int>();
 
     private void DressVehicle(Vehicle vehicle)
     {
@@ -192,9 +182,7 @@ public class HitAndRun : Callout
     {
         if (!API.DoesAnimDictExist(dict)) return false;
         API.RequestAnimDict(dict);
-        for (int i = 0; i < 50 && !API.HasAnimDictLoaded(dict); i++)
-            await BaseScript.Delay(100);
-        if (!API.HasAnimDictLoaded(dict)) return false;
+        if (!await (Task<bool>)QueueService.Predicate(() => !API.HasAnimDictLoaded(dict), 100, 5000)) return false;
 
         // The dict stays loaded while the pose is held, so it can be replayed after a bump.
         _ = HoldThenRelease();
@@ -212,7 +200,7 @@ public class HitAndRun : Callout
     // Bumping into or stepping over a ped is a temporary event, which BlockPermanentEvents doesn't
     // stop - the game drops their scenario/anim and never gives it back. Re-apply it until the
     // callout ends, or until they've been moved off the spot (directed to walk, fled, etc).
-    private async Task KeepPosed(Ped ped, Action apply, Func<bool> isPosed)
+    private Task KeepPosed(Ped ped, Action apply, Func<bool> isPosed)
     {
         var anchor = ped.Position;
         ped.BlockPermanentEvents = true;
@@ -220,20 +208,19 @@ public class HitAndRun : Callout
         API.SetPedCanEvasiveDive(ped.Handle, false);
         apply();
 
-        while (!Ended && ped.Exists() && !ped.IsDead)
+        return QueueService.Predicate(() =>
         {
-            await BaseScript.Delay(1000);
-            if (ped.IsRagdoll || isPosed()) continue;
-            if (ped.Position.DistanceToSquared(anchor) > 3f * 3f) break;
+            if (Ended || !ped.Exists() || ped.IsDead) return false;
+            if (ped.IsRagdoll || isPosed()) return true;
+            if (ped.Position.DistanceToSquared(anchor) > 3f * 3f) return false;
             apply();
-        }
+            return true;
+        }, 1000);
     }
 
     private static async Task<bool> LoadAnimSet(string set)
     {
         API.RequestAnimSet(set);
-        for (int i = 0; i < 50 && !API.HasAnimSetLoaded(set); i++)
-            await BaseScript.Delay(100);
-        return API.HasAnimSetLoaded(set);
+        return await (Task<bool>)QueueService.Predicate(() => !API.HasAnimSetLoaded(set), 100, 5000);
     }
 }
